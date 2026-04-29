@@ -260,6 +260,39 @@ class AnalysisTests(unittest.TestCase):
             ):
                 oh.get_token(required=True)
 
+    def test_get_token_falls_back_to_legacy_keychain_service(self):
+        missing = oh.subprocess.CompletedProcess(
+            args=["security"], returncode=44, stdout="", stderr="not found"
+        )
+        found = oh.subprocess.CompletedProcess(
+            args=["security"], returncode=0, stdout="legacy-token\n", stderr=""
+        )
+        with tempfile.TemporaryDirectory() as td:
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch.object(oh, "DEFAULT_TOKEN_FILE", str(Path(td) / "missing")),
+                patch.object(
+                    oh,
+                    "run_security",
+                    side_effect=[missing, missing, found],
+                ) as run_security,
+            ):
+                self.assertEqual(oh.get_token(required=True), "legacy-token")
+
+        services = [
+            call.args[0][2]
+            for call in run_security.call_args_list
+            if call.args[0][0] == "find-generic-password" and call.args[0][1] == "-s"
+        ]
+        self.assertEqual(
+            services,
+            [
+                oh.DEFAULT_KEYCHAIN_SERVICE,
+                oh.DEFAULT_KEYCHAIN_SERVICE,
+                oh.LEGACY_KEYCHAIN_SERVICE,
+            ],
+        )
+
     def test_sqlite_file_is_private_on_posix(self):
         if os.name != "posix":
             self.skipTest("POSIX file modes only")

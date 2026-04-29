@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-INTEGRATION = ROOT / "custom_components" / "oura_openclaw"
+INTEGRATION = ROOT / "custom_components" / "oura_ha_bridge"
 
 
 class HomeAssistantIntegrationStaticTests(unittest.TestCase):
@@ -12,20 +12,20 @@ class HomeAssistantIntegrationStaticTests(unittest.TestCase):
         manifest = json.loads(
             (INTEGRATION / "manifest.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(manifest["domain"], "oura_openclaw")
+        self.assertEqual(manifest["domain"], "oura_ha_bridge")
         for key in ("documentation", "issue_tracker", "codeowners", "name", "version"):
             self.assertIn(key, manifest)
         self.assertTrue(manifest["config_flow"])
         self.assertTrue(manifest["single_config_entry"])
 
         hacs = json.loads((ROOT / "hacs.json").read_text(encoding="utf-8"))
-        self.assertEqual(hacs["name"], "Oura OpenClaw")
+        self.assertEqual(hacs["name"], "Oura HA Bridge")
 
     def test_hacs_repository_layout(self):
         integrations = [
             path for path in (ROOT / "custom_components").iterdir() if path.is_dir()
         ]
-        self.assertEqual([path.name for path in integrations], ["oura_openclaw"])
+        self.assertEqual([path.name for path in integrations], ["oura_ha_bridge"])
         for filename in (
             "__init__.py",
             "api.py",

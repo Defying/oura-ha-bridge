@@ -1,4 +1,4 @@
-"""Coordinator for Oura OpenClaw."""
+"""Coordinator for Oura HA Bridge."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def entry_option(entry: ConfigEntry, key: str, default: Any) -> Any:
     return entry.data.get(key, default)
 
 
-class OuraOpenClawCoordinator(DataUpdateCoordinator[OuraBundle]):
+class OuraHABridgeCoordinator(DataUpdateCoordinator[OuraBundle]):
     """Fetch Oura data for Home Assistant entities."""
 
     config_entry: ConfigEntry

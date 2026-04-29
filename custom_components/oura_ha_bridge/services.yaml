@@ -1,6 +1,6 @@
 refresh:
   name: Refresh
-  description: Immediately refresh Oura data for all Oura OpenClaw entries, or one entry ID.
+  description: Immediately refresh Oura data for all Oura HA Bridge entries, or one entry ID.
   fields:
     entry_id:
       name: Entry ID

@@ -1,0 +1,14 @@
+{
+  "domain": "oura_ha_bridge",
+  "name": "Oura HA Bridge",
+  "after_dependencies": [],
+  "codeowners": ["@Defying"],
+  "config_flow": true,
+  "documentation": "https://github.com/Defying/oura-ha-bridge",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/Defying/oura-ha-bridge/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.2.0"
+}

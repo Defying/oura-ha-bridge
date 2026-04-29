@@ -1,9 +1,9 @@
-"""Constants for Oura OpenClaw."""
+"""Constants for Oura HA Bridge."""
 
 from __future__ import annotations
 
-DOMAIN = "oura_openclaw"
-NAME = "Oura OpenClaw"
+DOMAIN = "oura_ha_bridge"
+NAME = "Oura HA Bridge"
 
 API_BASE = "https://api.ouraring.com"
 

@@ -1,4 +1,4 @@
-"""Config flow for Oura OpenClaw."""
+"""Config flow for Oura HA Bridge."""
 
 from __future__ import annotations
 
@@ -70,8 +70,8 @@ async def async_validate_input(hass: HomeAssistant, data: dict[str, Any]) -> Non
     )
 
 
-class OuraOpenClawConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle an Oura OpenClaw config flow."""
+class OuraHABridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+    """Handle an Oura HA Bridge config flow."""
 
     VERSION = 1
 
@@ -82,7 +82,7 @@ class OuraOpenClawConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> config_entries.OptionsFlow:
         """Create the options flow."""
 
-        return OuraOpenClawOptionsFlow()
+        return OuraHABridgeOptionsFlow()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -120,8 +120,8 @@ class OuraOpenClawConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
 
-class OuraOpenClawOptionsFlow(config_entries.OptionsFlow):
-    """Handle Oura OpenClaw options."""
+class OuraHABridgeOptionsFlow(config_entries.OptionsFlow):
+    """Handle Oura HA Bridge options."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None

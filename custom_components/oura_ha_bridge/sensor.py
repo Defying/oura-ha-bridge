@@ -1,4 +1,4 @@
-"""Sensor platform for Oura OpenClaw."""
+"""Sensor platform for Oura HA Bridge."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from .const import (
     DOMAIN,
     NAME,
 )
-from .coordinator import OuraOpenClawCoordinator
+from .coordinator import OuraHABridgeCoordinator
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -243,15 +243,15 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Oura OpenClaw sensors."""
+    """Set up Oura HA Bridge sensors."""
 
-    coordinator: OuraOpenClawCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: OuraHABridgeCoordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities(
         OuraSensor(coordinator, entry, description) for description in SENSORS
     )
 
 
-class OuraSensor(CoordinatorEntity[OuraOpenClawCoordinator], SensorEntity):
+class OuraSensor(CoordinatorEntity[OuraHABridgeCoordinator], SensorEntity):
     """Oura sensor entity."""
 
     entity_description: OuraSensorDescription
@@ -259,7 +259,7 @@ class OuraSensor(CoordinatorEntity[OuraOpenClawCoordinator], SensorEntity):
 
     def __init__(
         self,
-        coordinator: OuraOpenClawCoordinator,
+        coordinator: OuraHABridgeCoordinator,
         entry: ConfigEntry,
         description: OuraSensorDescription,
     ) -> None:

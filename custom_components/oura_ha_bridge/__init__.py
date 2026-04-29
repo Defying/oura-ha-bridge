@@ -1,4 +1,4 @@
-"""Home Assistant integration for Oura OpenClaw."""
+"""Home Assistant integration for Oura HA Bridge."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
 
 from .const import DOMAIN
-from .coordinator import OuraOpenClawCoordinator
+from .coordinator import OuraHABridgeCoordinator
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
@@ -45,9 +45,9 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Oura OpenClaw from a config entry."""
+    """Set up Oura HA Bridge from a config entry."""
 
-    coordinator = OuraOpenClawCoordinator(hass, entry)
+    coordinator = OuraHABridgeCoordinator(hass, entry)
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
@@ -59,7 +59,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload an Oura OpenClaw config entry."""
+    """Unload an Oura HA Bridge config entry."""
 
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
@@ -68,7 +68,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload an Oura OpenClaw config entry."""
+    """Reload an Oura HA Bridge config entry."""
 
     await async_unload_entry(hass, entry)
     await async_setup_entry(hass, entry)

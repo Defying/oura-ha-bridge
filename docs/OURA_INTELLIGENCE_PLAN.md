@@ -66,8 +66,8 @@ Only interrupt for:
 
 Implemented:
 
-- `oura-health sync`: syncs Oura API docs into local SQLite at `data/oura.sqlite3`.
-- `oura-health analyze`: syncs then prints adaptive baseline analysis.
+- `oura-ha-bridge sync`: syncs Oura API docs into local SQLite at `data/oura.sqlite3`.
+- `oura-ha-bridge analyze`: syncs then prints adaptive baseline analysis.
 - Includes data freshness/confidence, battery, readiness, sleep, activity, stress, resilience, SpO₂/BDI, and next-move text.
 
 ## Next slices

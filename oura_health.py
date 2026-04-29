@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Small OpenClaw-friendly Oura API helper.
+"""Oura HA Bridge CLI helper for Oura API health digests.
 
 The digest command does not persist raw health data. Sync/analyze commands store
 raw Oura documents in a local gitignored SQLite database. The API token is read from one of:
   1. OURA_TOKEN environment variable
   2. local token file `data/oura.token` or OURA_TOKEN_FILE
-  3. macOS Keychain generic password service `openclaw-oura-api`
+  3. macOS Keychain generic password service `oura-ha-bridge-api`
 
-Use `oura-health setup-token-file` to avoid Keychain unlock prompts.
+Use `oura-ha-bridge setup-token-file` to avoid Keychain unlock prompts.
 """
 
 from __future__ import annotations
@@ -35,7 +35,9 @@ except Exception:  # pragma: no cover
     ZoneInfo = None  # type: ignore
 
 API_BASE = "https://api.ouraring.com"
-KEYCHAIN_SERVICE = os.environ.get("OURA_KEYCHAIN_SERVICE", "openclaw-oura-api")
+DEFAULT_KEYCHAIN_SERVICE = "oura-ha-bridge-api"
+LEGACY_KEYCHAIN_SERVICE = "openclaw-oura-api"
+KEYCHAIN_SERVICE = os.environ.get("OURA_KEYCHAIN_SERVICE", DEFAULT_KEYCHAIN_SERVICE)
 KEYCHAIN_ACCOUNT = os.environ.get(
     "OURA_KEYCHAIN_ACCOUNT", os.environ.get("USER", "oura")
 )
@@ -199,6 +201,24 @@ def get_keychain_token(
     return lookup_keychain_token(service, account).token
 
 
+def lookup_keychain_token_with_legacy(
+    service: str = KEYCHAIN_SERVICE, account: str = KEYCHAIN_ACCOUNT
+) -> tuple[KeychainLookup, str]:
+    keychain = lookup_keychain_token(service, account)
+    if (
+        keychain.token
+        or keychain.item_exists
+        or service != DEFAULT_KEYCHAIN_SERVICE
+        or os.environ.get("OURA_KEYCHAIN_SERVICE")
+    ):
+        return keychain, service
+
+    legacy = lookup_keychain_token(LEGACY_KEYCHAIN_SERVICE, account)
+    if legacy.token or legacy.item_exists:
+        return legacy, LEGACY_KEYCHAIN_SERVICE
+    return keychain, service
+
+
 def store_keychain_token(
     token: str, service: str, account: str
 ) -> subprocess.CompletedProcess[str]:
@@ -231,7 +251,7 @@ def get_token(required: bool = True) -> str | None:
             f"Oura token file exists at {token_file.path!r} but cannot be used: "
             f"{token_file.read_error or 'unknown token file error'}."
         )
-    keychain = lookup_keychain_token()
+    keychain, keychain_service = lookup_keychain_token_with_legacy()
     if keychain.token:
         return keychain.token
     if required:
@@ -239,10 +259,11 @@ def get_token(required: bool = True) -> str | None:
             raise MissingToken(
                 "Oura token exists in macOS Keychain but cannot be read from this session: "
                 f"{keychain.read_error or 'unknown Keychain error'}. "
-                "Unlock the login keychain or run `oura-health setup-token` from an interactive terminal."
+                f"service={keychain_service!r}. Unlock the login keychain or run "
+                "`oura-ha-bridge setup-token` from an interactive terminal."
             )
         raise MissingToken(
-            "missing Oura API token. Run `oura-health setup-token-file` privately on this Mac, "
+            "missing Oura API token. Run `oura-ha-bridge setup-token-file` privately on this Mac, "
             "or set OURA_TOKEN in the environment."
         )
     return None
@@ -290,7 +311,7 @@ def setup_token(args: argparse.Namespace) -> int:
     if not token:
         return 2
 
-    # Trust /usr/bin/security so the same CLI path can read it from OpenClaw cron.
+    # Trust /usr/bin/security so the same CLI path can read it from scheduled jobs.
     proc = store_keychain_token(token, args.service, args.account)
     if proc.returncode != 0:
         eprint(
@@ -319,21 +340,24 @@ def token_status(args: argparse.Namespace) -> int:
             f"{token_file.read_error or 'unknown token file error'}"
         )
         return 1
-    keychain = lookup_keychain_token(args.service, args.account)
+    keychain, keychain_service = lookup_keychain_token_with_legacy(
+        args.service, args.account
+    )
     if keychain.token:
         print(
-            f"token source: macOS Keychain service={args.service!r} account={args.account!r}"
+            f"token source: macOS Keychain service={keychain_service!r} account={args.account!r}"
         )
         return 0
     if keychain.item_exists:
         print(
             "token source: macOS Keychain item exists but password is not readable "
-            f"service={args.service!r} account={args.account!r}: "
+            f"service={keychain_service!r} account={args.account!r}: "
             f"{keychain.read_error or 'unknown Keychain error'}"
         )
         return 1
     print(
-        f"missing token: no OURA_TOKEN env var and no Keychain item service={args.service!r} account={args.account!r}"
+        f"missing token: no OURA_TOKEN env var, token file, or Keychain item "
+        f"service={args.service!r} account={args.account!r}"
     )
     return 1
 
@@ -1428,7 +1452,9 @@ def cmd_raw(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="OpenClaw helper for Oura API v2")
+    parser = argparse.ArgumentParser(
+        description="Oura HA Bridge helper for Oura API v2"
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     setup = sub.add_parser(

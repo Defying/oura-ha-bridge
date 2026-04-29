@@ -1,4 +1,4 @@
-"""Diagnostics for Oura OpenClaw."""
+"""Diagnostics for Oura HA Bridge."""
 
 from __future__ import annotations
 

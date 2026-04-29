@@ -1,9 +1,9 @@
 {
-  "title": "Oura OpenClaw",
+  "title": "Oura HA Bridge",
   "config": {
     "step": {
       "user": {
-        "title": "Set up Oura OpenClaw",
+        "title": "Set up Oura HA Bridge",
         "description": "Use either an Oura personal access token or a token file path. Relative token file paths are resolved from the Home Assistant config directory.",
         "data": {
           "api_token": "Oura API token",
@@ -19,13 +19,13 @@
       "invalid_token_source": "Enter either an API token or a token file path, not both."
     },
     "abort": {
-      "already_configured": "Oura OpenClaw is already configured."
+      "already_configured": "Oura HA Bridge is already configured."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Oura OpenClaw options",
+        "title": "Oura HA Bridge options",
         "data": {
           "days": "Days to fetch",
           "scan_interval": "Update interval in seconds"
