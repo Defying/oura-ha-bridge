@@ -4,6 +4,8 @@ Local CLI helper for Oura API v2 health digests and adaptive personal-baseline a
 
 It syncs Oura data into a local SQLite database, learns rolling personal baselines, and renders concise reports for automation/chat systems.
 
+Also included: a Home Assistant custom integration under `custom_components/oura_openclaw`.
+
 ## Privacy defaults
 
 - Oura API tokens are read from `OURA_TOKEN`, local `data/oura.token`, or macOS Keychain.
@@ -94,6 +96,30 @@ oura-health raw daily_sleep --days 14
 oura-health raw sleep --days 14
 oura-health raw ring_battery_level --latest
 ```
+
+## Home Assistant
+
+Copy or symlink `custom_components/oura_openclaw` into your Home Assistant `/config/custom_components/` directory, restart Home Assistant, then add **Oura OpenClaw** from **Settings → Devices & services → Add integration**.
+
+The integration supports either:
+
+- direct Oura API token entry in the config flow, or
+- a token file path readable by Home Assistant.
+
+For a token file on Home Assistant OS, put the token in a file such as `/config/oura.token` with `0600` permissions, then enter `oura.token` in the setup form. Relative paths are resolved from the Home Assistant config directory.
+
+Sensors include readiness, sleep, activity, stress, resilience, SpO2, battery, sleep-stage durations, HRV, heart rate, bedtime timestamps, and a compact summary sensor. The `oura_openclaw.refresh` service forces an immediate refresh.
+
+## HACS
+
+This repository is structured for HACS as a custom integration:
+
+- one integration under `custom_components/oura_openclaw`
+- root `hacs.json`
+- integration `manifest.json` with `domain`, `documentation`, `issue_tracker`, `codeowners`, `name`, and `version`
+- HACS and Hassfest GitHub Actions
+
+To install before default HACS listing, add this repository as a HACS custom repository with category **Integration**.
 
 ## Local data
 
