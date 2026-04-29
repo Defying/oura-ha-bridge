@@ -6,7 +6,7 @@ It syncs Oura data into a local SQLite database, learns rolling personal baselin
 
 ## Privacy defaults
 
-- Oura API tokens are read from `OURA_TOKEN` or macOS Keychain.
+- Oura API tokens are read from `OURA_TOKEN`, local `data/oura.token`, or macOS Keychain.
 - Raw Oura data is stored locally under gitignored `data/`.
 - The public repo contains code, docs, and synthetic tests only — no raw health data.
 - Analysis is pattern spotting, not medical advice.
@@ -28,6 +28,14 @@ ln -sf "$PWD/bin/oura-health" ~/.local/bin/oura-health
 ## Token setup
 
 Create a personal access token at <https://cloud.ouraring.com/personal-access-tokens>.
+
+Local token file storage, best for scheduled jobs that should not wait on Keychain unlock:
+
+```bash
+oura-health setup-token-file
+```
+
+This writes `data/oura.token` with `0600` permissions. `data/` is gitignored.
 
 macOS Keychain storage:
 

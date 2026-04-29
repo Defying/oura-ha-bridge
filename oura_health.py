@@ -4,9 +4,10 @@
 The digest command does not persist raw health data. Sync/analyze commands store
 raw Oura documents in a local gitignored SQLite database. The API token is read from one of:
   1. OURA_TOKEN environment variable
-  2. macOS Keychain generic password service `openclaw-oura-api`
+  2. local token file `data/oura.token` or OURA_TOKEN_FILE
+  3. macOS Keychain generic password service `openclaw-oura-api`
 
-Use `oura-health setup-token` from a private local terminal to store the token.
+Use `oura-health setup-token-file` to avoid Keychain unlock prompts.
 """
 
 from __future__ import annotations
@@ -62,6 +63,9 @@ PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DB_PATH = os.environ.get(
     "OURA_DB", os.path.join(PROJECT_DIR, "data", "oura.sqlite3")
 )
+DEFAULT_TOKEN_FILE = os.environ.get(
+    "OURA_TOKEN_FILE", os.path.join(PROJECT_DIR, "data", "oura.token")
+)
 SCHEMA_VERSION = 1
 
 
@@ -77,6 +81,14 @@ class MissingToken(OuraError):
 class KeychainLookup:
     token: str | None
     item_exists: bool
+    read_error: str | None = None
+
+
+@dataclass(frozen=True)
+class TokenFileLookup:
+    token: str | None
+    path: str
+    file_exists: bool
     read_error: str | None = None
 
 
@@ -125,6 +137,46 @@ def keychain_read_error(proc: subprocess.CompletedProcess[str]) -> str:
     return f"security exited {proc.returncode}; Keychain may be locked or requiring user interaction"
 
 
+def ensure_parent_dir(path: str) -> None:
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+
+
+def ensure_private_file(path: str) -> None:
+    if os.name != "posix" or path == ":memory:":
+        return
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    except FileExistsError:
+        os.chmod(path, 0o600)
+    else:
+        os.close(fd)
+
+
+def ensure_private_existing_file(path: str) -> None:
+    if os.name != "posix" or path == ":memory:" or not os.path.exists(path):
+        return
+    os.chmod(path, 0o600)
+
+
+def lookup_token_file(path: str | None = None) -> TokenFileLookup:
+    path = path or DEFAULT_TOKEN_FILE
+    if not path or not os.path.exists(path):
+        return TokenFileLookup(None, path, file_exists=False)
+    try:
+        ensure_private_existing_file(path)
+        with open(path, encoding="utf-8") as fh:
+            token = fh.readline().strip()
+    except OSError as exc:
+        return TokenFileLookup(None, path, file_exists=True, read_error=str(exc))
+    if not token:
+        return TokenFileLookup(
+            None, path, file_exists=True, read_error="token file is empty"
+        )
+    return TokenFileLookup(token, path, file_exists=True)
+
+
 def lookup_keychain_token(
     service: str = KEYCHAIN_SERVICE, account: str = KEYCHAIN_ACCOUNT
 ) -> KeychainLookup:
@@ -171,6 +223,14 @@ def get_token(required: bool = True) -> str | None:
     token = os.environ.get("OURA_TOKEN", "").strip()
     if token:
         return token
+    token_file = lookup_token_file()
+    if token_file.token:
+        return token_file.token
+    if required and token_file.file_exists:
+        raise MissingToken(
+            f"Oura token file exists at {token_file.path!r} but cannot be used: "
+            f"{token_file.read_error or 'unknown token file error'}."
+        )
     keychain = lookup_keychain_token()
     if keychain.token:
         return keychain.token
@@ -182,23 +242,52 @@ def get_token(required: bool = True) -> str | None:
                 "Unlock the login keychain or run `oura-health setup-token` from an interactive terminal."
             )
         raise MissingToken(
-            "missing Oura API token. Run `oura-health setup-token` privately on this Mac, "
+            "missing Oura API token. Run `oura-health setup-token-file` privately on this Mac, "
             "or set OURA_TOKEN in the environment."
         )
     return None
+
+
+def prompt_for_token() -> str | None:
+    token = getpass.getpass("Oura token: ").strip()
+    if not token:
+        eprint("no token entered")
+        return None
+    confirm = getpass.getpass("Paste it again: ").strip()
+    if token != confirm:
+        eprint("tokens did not match; nothing stored")
+        return None
+    return token
+
+
+def setup_token_file(args: argparse.Namespace) -> int:
+    print(
+        "Paste your Oura personal access token. Input is hidden; it will be stored in a local chmod 600 file."
+    )
+    token = prompt_for_token()
+    if not token:
+        return 2
+    ensure_parent_dir(args.path)
+    try:
+        fd = os.open(args.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(token + "\n")
+        ensure_private_existing_file(args.path)
+    except OSError as exc:
+        eprint(f"failed to write token file {args.path!r}: {exc}")
+        return 1
+    print(
+        f"stored Oura token file at {args.path!r}; Keychain will not be used while this file exists"
+    )
+    return 0
 
 
 def setup_token(args: argparse.Namespace) -> int:
     print(
         "Paste your Oura personal access token. Input is hidden; it will be stored in macOS Keychain."
     )
-    token = getpass.getpass("Oura token: ").strip()
+    token = prompt_for_token()
     if not token:
-        eprint("no token entered")
-        return 2
-    confirm = getpass.getpass("Paste it again: ").strip()
-    if token != confirm:
-        eprint("tokens did not match; nothing stored")
         return 2
 
     # Trust /usr/bin/security so the same CLI path can read it from OpenClaw cron.
@@ -220,6 +309,16 @@ def token_status(args: argparse.Namespace) -> int:
     if os.environ.get("OURA_TOKEN", "").strip():
         print("token source: OURA_TOKEN environment variable")
         return 0
+    token_file = lookup_token_file(args.token_file)
+    if token_file.token:
+        print(f"token source: local token file path={token_file.path!r}")
+        return 0
+    if token_file.file_exists:
+        print(
+            f"token file exists but is not usable path={token_file.path!r}: "
+            f"{token_file.read_error or 'unknown token file error'}"
+        )
+        return 1
     keychain = lookup_keychain_token(args.service, args.account)
     if keychain.token:
         print(
@@ -696,29 +795,6 @@ def build_digest(bundle: dict[str, Any], *, days: int) -> str:
 # ---------------------------------------------------------------------------
 # Local storage + adaptive analysis
 # ---------------------------------------------------------------------------
-
-
-def ensure_parent_dir(path: str) -> None:
-    parent = os.path.dirname(os.path.abspath(path))
-    if parent:
-        os.makedirs(parent, mode=0o700, exist_ok=True)
-
-
-def ensure_private_file(path: str) -> None:
-    if os.name != "posix" or path == ":memory:":
-        return
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
-    except FileExistsError:
-        os.chmod(path, 0o600)
-    else:
-        os.close(fd)
-
-
-def ensure_private_existing_file(path: str) -> None:
-    if os.name != "posix" or path == ":memory:" or not os.path.exists(path):
-        return
-    os.chmod(path, 0o600)
 
 
 def ensure_private_sqlite_files(path: str) -> None:
@@ -1362,11 +1438,19 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--account", default=KEYCHAIN_ACCOUNT)
     setup.set_defaults(func=setup_token)
 
+    setup_file = sub.add_parser(
+        "setup-token-file",
+        help="prompt for an Oura token and store it in a local chmod 600 file",
+    )
+    setup_file.add_argument("--path", default=DEFAULT_TOKEN_FILE)
+    setup_file.set_defaults(func=setup_token_file)
+
     status = sub.add_parser(
         "token-status", help="check whether a token source is configured"
     )
     status.add_argument("--service", default=KEYCHAIN_SERVICE)
     status.add_argument("--account", default=KEYCHAIN_ACCOUNT)
+    status.add_argument("--token-file", default=DEFAULT_TOKEN_FILE)
     status.set_defaults(func=token_status)
 
     digest = sub.add_parser("digest", help="print a concise daily health digest")

@@ -171,6 +171,60 @@ class AnalysisTests(unittest.TestCase):
             run_security.call_args.kwargs["input_text"], sample_value + "\n"
         )
 
+    def test_setup_token_file_writes_private_file(self):
+        sample_value = "placeholder-value"
+        with tempfile.TemporaryDirectory() as td:
+            path = str(Path(td) / "oura.token")
+            args = argparse.Namespace(path=path)
+            stdout = io.StringIO()
+            with (
+                patch("getpass.getpass", side_effect=[sample_value, sample_value]),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(oh.setup_token_file(args), 0)
+            self.assertEqual(
+                Path(path).read_text(encoding="utf-8"), sample_value + "\n"
+            )
+            if os.name == "posix":
+                mode = stat.S_IMODE(os.stat(path).st_mode)
+                self.assertEqual(mode & 0o077, 0)
+
+    def test_get_token_prefers_token_file_without_keychain(self):
+        sample_value = "placeholder-value"
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "oura.token"
+            path.write_text(sample_value + "\n", encoding="utf-8")
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch.object(oh, "DEFAULT_TOKEN_FILE", str(path)),
+                patch.object(
+                    oh,
+                    "run_security",
+                    side_effect=AssertionError("keychain should not be read"),
+                ),
+            ):
+                self.assertEqual(oh.get_token(required=True), sample_value)
+
+    def test_token_status_reports_token_file_without_keychain(self):
+        sample_value = "placeholder-value"
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "oura.token"
+            path.write_text(sample_value + "\n", encoding="utf-8")
+            args = argparse.Namespace(
+                service="svc", account="acct", token_file=str(path)
+            )
+            stdout = io.StringIO()
+            with (
+                patch.object(
+                    oh,
+                    "run_security",
+                    side_effect=AssertionError("keychain should not be read"),
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(oh.token_status(args), 0)
+            self.assertIn("local token file", stdout.getvalue())
+
     def test_token_status_reports_unreadable_keychain_item(self):
         denied = oh.subprocess.CompletedProcess(
             args=["security"], returncode=36, stdout="", stderr=""
@@ -178,8 +232,13 @@ class AnalysisTests(unittest.TestCase):
         metadata = oh.subprocess.CompletedProcess(
             args=["security"], returncode=0, stdout="metadata", stderr=""
         )
-        with patch.object(oh, "run_security", side_effect=[denied, metadata]):
-            args = argparse.Namespace(service="svc", account="acct")
+        with (
+            tempfile.TemporaryDirectory() as td,
+            patch.object(oh, "run_security", side_effect=[denied, metadata]),
+        ):
+            args = argparse.Namespace(
+                service="svc", account="acct", token_file=str(Path(td) / "missing")
+            )
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 self.assertEqual(oh.token_status(args), 1)
@@ -192,12 +251,14 @@ class AnalysisTests(unittest.TestCase):
         metadata = oh.subprocess.CompletedProcess(
             args=["security"], returncode=0, stdout="metadata", stderr=""
         )
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch.object(oh, "run_security", side_effect=[denied, metadata]),
-            self.assertRaisesRegex(oh.MissingToken, "exists in macOS Keychain"),
-        ):
-            oh.get_token(required=True)
+        with tempfile.TemporaryDirectory() as td:
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch.object(oh, "DEFAULT_TOKEN_FILE", str(Path(td) / "missing")),
+                patch.object(oh, "run_security", side_effect=[denied, metadata]),
+                self.assertRaisesRegex(oh.MissingToken, "exists in macOS Keychain"),
+            ):
+                oh.get_token(required=True)
 
     def test_sqlite_file_is_private_on_posix(self):
         if os.name != "posix":
