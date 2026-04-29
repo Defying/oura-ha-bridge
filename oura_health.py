@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Small OpenClaw-friendly Oura API helper.
 
-No raw health data is persisted by default. The API token is read from one of:
+The digest command does not persist raw health data. Sync/analyze commands store
+raw Oura documents in a local gitignored SQLite database. The API token is read from one of:
   1. OURA_TOKEN environment variable
   2. macOS Keychain generic password service `openclaw-oura-api`
 
@@ -18,7 +19,7 @@ import json
 import os
 import sqlite3
 import statistics
-import subprocess
+import subprocess  # nosec B404
 import sys
 import time
 import urllib.error
@@ -34,7 +35,9 @@ except Exception:  # pragma: no cover
 
 API_BASE = "https://api.ouraring.com"
 KEYCHAIN_SERVICE = os.environ.get("OURA_KEYCHAIN_SERVICE", "openclaw-oura-api")
-KEYCHAIN_ACCOUNT = os.environ.get("OURA_KEYCHAIN_ACCOUNT", os.environ.get("USER", "oura"))
+KEYCHAIN_ACCOUNT = os.environ.get(
+    "OURA_KEYCHAIN_ACCOUNT", os.environ.get("USER", "oura")
+)
 DEFAULT_TZ = os.environ.get("OURA_TZ", "America/New_York")
 
 DATE_ENDPOINTS = {
@@ -56,7 +59,9 @@ TIMESERIES_ENDPOINTS = {
 }
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_DB_PATH = os.environ.get("OURA_DB", os.path.join(PROJECT_DIR, "data", "oura.sqlite3"))
+DEFAULT_DB_PATH = os.environ.get(
+    "OURA_DB", os.path.join(PROJECT_DIR, "data", "oura.sqlite3")
+)
 SCHEMA_VERSION = 1
 
 
@@ -72,22 +77,68 @@ def eprint(*args: Any) -> None:
     print(*args, file=sys.stderr)
 
 
-def run_security(args: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["/usr/bin/security", *args],
-        input=input_text,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return parsed
 
 
-def get_keychain_token(service: str = KEYCHAIN_SERVICE, account: str = KEYCHAIN_ACCOUNT) -> str | None:
+def run_security(
+    args: list[str], *, input_text: str | None = None, timeout: int = 30
+) -> subprocess.CompletedProcess[str]:
+    cmd = ["/usr/bin/security", *args]
+    try:
+        # `cmd` starts with fixed /usr/bin/security and shell remains False.
+        return subprocess.run(  # nosec B603
+            cmd,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        return subprocess.CompletedProcess(cmd, 127, "", str(exc))
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        return subprocess.CompletedProcess(
+            cmd, 124, stdout, stderr or "security command timed out"
+        )
+
+
+def get_keychain_token(
+    service: str = KEYCHAIN_SERVICE, account: str = KEYCHAIN_ACCOUNT
+) -> str | None:
     proc = run_security(["find-generic-password", "-s", service, "-a", account, "-w"])
     if proc.returncode != 0:
         return None
     token = proc.stdout.strip()
     return token or None
+
+
+def store_keychain_token(
+    token: str, service: str, account: str
+) -> subprocess.CompletedProcess[str]:
+    # Keep the token out of argv/process listings. `security` prompts when -w is last.
+    return run_security(
+        [
+            "add-generic-password",
+            "-U",
+            "-s",
+            service,
+            "-a",
+            account,
+            "-T",
+            "/usr/bin/security",
+            "-w",
+        ],
+        input_text=token + "\n",
+    )
 
 
 def get_token(required: bool = True) -> str | None:
@@ -106,7 +157,9 @@ def get_token(required: bool = True) -> str | None:
 
 
 def setup_token(args: argparse.Namespace) -> int:
-    print("Paste your Oura personal access token. Input is hidden; it will be stored in macOS Keychain.")
+    print(
+        "Paste your Oura personal access token. Input is hidden; it will be stored in macOS Keychain."
+    )
     token = getpass.getpass("Oura token: ").strip()
     if not token:
         eprint("no token entered")
@@ -117,24 +170,17 @@ def setup_token(args: argparse.Namespace) -> int:
         return 2
 
     # Trust /usr/bin/security so the same CLI path can read it from OpenClaw cron.
-    proc = run_security(
-        [
-            "add-generic-password",
-            "-U",
-            "-s",
-            args.service,
-            "-a",
-            args.account,
-            "-w",
-            token,
-            "-T",
-            "/usr/bin/security",
-        ]
-    )
+    proc = store_keychain_token(token, args.service, args.account)
     if proc.returncode != 0:
-        eprint(proc.stderr.strip() or proc.stdout.strip() or "failed to write token to Keychain")
+        eprint(
+            proc.stderr.strip()
+            or proc.stdout.strip()
+            or "failed to write token to Keychain"
+        )
         return proc.returncode or 1
-    print(f"stored Oura token in Keychain service={args.service!r} account={args.account!r}")
+    print(
+        f"stored Oura token in Keychain service={args.service!r} account={args.account!r}"
+    )
     return 0
 
 
@@ -144,9 +190,13 @@ def token_status(args: argparse.Namespace) -> int:
         return 0
     token = get_keychain_token(args.service, args.account)
     if token:
-        print(f"token source: macOS Keychain service={args.service!r} account={args.account!r}")
+        print(
+            f"token source: macOS Keychain service={args.service!r} account={args.account!r}"
+        )
         return 0
-    print(f"missing token: no OURA_TOKEN env var and no Keychain item service={args.service!r} account={args.account!r}")
+    print(
+        f"missing token: no OURA_TOKEN env var and no Keychain item service={args.service!r} account={args.account!r}"
+    )
     return 1
 
 
@@ -156,25 +206,40 @@ class OuraClient:
     timeout: int = 30
     max_pages: int = 20
 
+    def __post_init__(self) -> None:
+        if self.timeout < 1:
+            raise ValueError("timeout must be >= 1")
+        if self.max_pages < 1:
+            raise ValueError("max_pages must be >= 1")
+
     def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = {k: v for k, v in (params or {}).items() if v is not None}
         url = API_BASE + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.token}"})
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {self.token}"}
+        )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            # API_BASE is fixed HTTPS.
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # nosec B310
                 raw = resp.read().decode("utf-8")
                 return json.loads(raw)
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", "replace")[:1000]
             if exc.code == 401:
-                raise OuraError("Oura API rejected the token (401). Create/store a fresh token.") from exc
+                raise OuraError(
+                    "Oura API rejected the token (401). Create/store a fresh token."
+                ) from exc
             if exc.code == 403:
-                raise OuraError("Oura API returned 403. Subscription/API access may be unavailable.") from exc
+                raise OuraError(
+                    "Oura API returned 403. Subscription/API access may be unavailable."
+                ) from exc
             if exc.code == 429:
                 retry_after = exc.headers.get("Retry-After")
-                raise OuraError(f"Oura API rate limit exceeded (429). Retry-After={retry_after or 'unknown'}.") from exc
+                raise OuraError(
+                    f"Oura API rate limit exceeded (429). Retry-After={retry_after or 'unknown'}."
+                ) from exc
             raise OuraError(f"Oura API HTTP {exc.code}: {body}") from exc
         except urllib.error.URLError as exc:
             raise OuraError(f"Oura API network error: {exc.reason}") from exc
@@ -196,6 +261,10 @@ class OuraClient:
             if not next_token:
                 break
             time.sleep(0.2)
+        else:
+            raise OuraError(
+                f"Oura API pagination exceeded max_pages={self.max_pages}; refusing partial results"
+            )
         return out
 
 
@@ -209,17 +278,26 @@ def iso_date(d: dt.date) -> str:
 
 
 def date_range(days: int, tz_name: str = DEFAULT_TZ) -> tuple[str, str]:
+    if days < 1:
+        raise ValueError("days must be >= 1")
     end = today(tz_name) + dt.timedelta(days=1)
     start = end - dt.timedelta(days=days)
     return iso_date(start), iso_date(end)
 
 
-def fetch_bundle(client: OuraClient, days: int, include_timeseries: bool = True) -> dict[str, Any]:
+def fetch_bundle(
+    client: OuraClient, days: int, include_timeseries: bool = True
+) -> dict[str, Any]:
     start_date, end_date = date_range(days)
-    bundle: dict[str, Any] = {"range": {"start_date": start_date, "end_date": end_date}, "fetched_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+    bundle: dict[str, Any] = {
+        "range": {"start_date": start_date, "end_date": end_date},
+        "fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
 
     for name, path in DATE_ENDPOINTS.items():
-        bundle[name] = client.list_documents(path, {"start_date": start_date, "end_date": end_date})
+        bundle[name] = client.list_documents(
+            path, {"start_date": start_date, "end_date": end_date}
+        )
 
     if include_timeseries:
         # For digest purposes, latest battery is more useful than a giant time series.
@@ -247,20 +325,29 @@ def newest(items: list[dict[str, Any]], key: str = "day") -> dict[str, Any] | No
     return sorted(filtered, key=lambda x: str(x.get(key)))[-1]
 
 
-def previous_for_day(items: list[dict[str, Any]], day: str | None) -> dict[str, Any] | None:
+def previous_for_day(
+    items: list[dict[str, Any]], day: str | None
+) -> dict[str, Any] | None:
     if not day:
         return None
-    older = [x for x in items if isinstance(x.get("day"), str) and str(x.get("day")) < day]
+    older = [
+        x for x in items if isinstance(x.get("day"), str) and str(x.get("day")) < day
+    ]
     return sorted(older, key=lambda x: str(x.get("day")))[-1] if older else None
 
 
-def main_sleep_for_day(sleeps: list[dict[str, Any]], day: str | None) -> dict[str, Any] | None:
+def main_sleep_for_day(
+    sleeps: list[dict[str, Any]], day: str | None
+) -> dict[str, Any] | None:
     candidates = [x for x in sleeps if x.get("day") == day]
     if not candidates:
         return None
     long = [x for x in candidates if x.get("type") in ("long_sleep", "long")]
     pool = long or candidates
-    return sorted(pool, key=lambda x: int(x.get("time_in_bed") or x.get("total_sleep_duration") or 0))[-1]
+    return sorted(
+        pool,
+        key=lambda x: int(x.get("time_in_bed") or x.get("total_sleep_duration") or 0),
+    )[-1]
 
 
 def fmt_int(n: Any) -> str | None:
@@ -287,8 +374,8 @@ def fmt_score(n: Any, prev: Any = None) -> str | None:
                 delta = f" (+{d})"
             elif d < 0:
                 delta = f" ({d})"
-        except Exception:
-            pass
+        except (TypeError, ValueError):
+            delta = ""
     return f"{base}{delta}"
 
 
@@ -350,7 +437,9 @@ def fmt_pct(n: Any) -> str | None:
         return None
 
 
-def contributor_watch(contribs: Any, *, threshold: int = 75, limit: int = 3) -> list[str]:
+def contributor_watch(
+    contribs: Any, *, threshold: int = 75, limit: int = 3
+) -> list[str]:
     if not isinstance(contribs, dict):
         return []
     pairs: list[tuple[float, str]] = []
@@ -359,8 +448,8 @@ def contributor_watch(contribs: Any, *, threshold: int = 75, limit: int = 3) -> 
             continue
         try:
             score = float(value)
-        except Exception:
-            continue
+        except (TypeError, ValueError):
+            score = threshold
         if score < threshold:
             pairs.append((score, key.replace("_", " ")))
     pairs.sort()
@@ -384,8 +473,17 @@ def build_digest(bundle: dict[str, Any], *, days: int) -> str:
     battery = bundle.get("ring_battery_level") or []
 
     candidate_days = []
-    for collection in (daily_sleep, daily_readiness, daily_activity, daily_stress, daily_resilience, daily_spo2):
-        candidate_days.extend([x.get("day") for x in collection if isinstance(x.get("day"), str)])
+    for collection in (
+        daily_sleep,
+        daily_readiness,
+        daily_activity,
+        daily_stress,
+        daily_resilience,
+        daily_spo2,
+    ):
+        candidate_days.extend(
+            [x.get("day") for x in collection if isinstance(x.get("day"), str)]
+        )
     if not candidate_days:
         r = bundle.get("range", {})
         return f"oura health digest: no Oura daily data found for {r.get('start_date')} → {r.get('end_date')}. sync the ring/app and try again."
@@ -406,13 +504,15 @@ def build_digest(bundle: dict[str, Any], *, days: int) -> str:
     pretty_day = day
     try:
         pretty_day = dt.date.fromisoformat(day).strftime("%a %b %-d")
-    except Exception:
-        pass
+    except ValueError:
+        pretty_day = day
 
     lines = [f"oura health digest — {pretty_day}"]
 
     if dr:
-        bits = [f"readiness {fmt_score(dr.get('score'), prev_dr.get('score') if prev_dr else None)}"]
+        bits = [
+            f"readiness {fmt_score(dr.get('score'), prev_dr.get('score') if prev_dr else None)}"
+        ]
         temp = fmt_temp(dr.get("temperature_deviation"))
         if temp:
             bits.append(f"temp {temp}")
@@ -422,7 +522,11 @@ def build_digest(bundle: dict[str, Any], *, days: int) -> str:
         lines.append("- " + compact_join(bits, " — "))
 
     if ds or sleep_detail:
-        score = fmt_score(ds.get("score"), prev_ds.get("score") if prev_ds and ds else None) if ds else None
+        score = (
+            fmt_score(ds.get("score"), prev_ds.get("score") if prev_ds and ds else None)
+            if ds
+            else None
+        )
         detail = sleep_detail or {}
         sleep_bits = [f"sleep {score}" if score else "sleep"]
         duration = fmt_seconds(detail.get("total_sleep_duration"))
@@ -435,17 +539,31 @@ def build_digest(bundle: dict[str, Any], *, days: int) -> str:
         bed_end = fmt_time(detail.get("bedtime_end"))
         if bed_start and bed_end:
             sleep_bits.append(f"bed {bed_start}–{bed_end}")
-        physiology = compact_join([
-            f"HRV {fmt_int(detail.get('average_hrv'))}ms" if fmt_int(detail.get("average_hrv")) else None,
-            f"RHR {fmt_int(detail.get('lowest_heart_rate'))}" if fmt_int(detail.get("lowest_heart_rate")) else None,
-            f"eff {fmt_int(detail.get('efficiency'))}%" if fmt_int(detail.get("efficiency")) else None,
-        ])
+        physiology = compact_join(
+            [
+                f"HRV {fmt_int(detail.get('average_hrv'))}ms"
+                if fmt_int(detail.get("average_hrv"))
+                else None,
+                f"RHR {fmt_int(detail.get('lowest_heart_rate'))}"
+                if fmt_int(detail.get("lowest_heart_rate"))
+                else None,
+                f"eff {fmt_int(detail.get('efficiency'))}%"
+                if fmt_int(detail.get("efficiency"))
+                else None,
+            ]
+        )
         if physiology:
             sleep_bits.append(physiology)
-        stages = compact_join([
-            f"deep {fmt_seconds(detail.get('deep_sleep_duration'))}" if fmt_seconds(detail.get("deep_sleep_duration")) else None,
-            f"REM {fmt_seconds(detail.get('rem_sleep_duration'))}" if fmt_seconds(detail.get("rem_sleep_duration")) else None,
-        ])
+        stages = compact_join(
+            [
+                f"deep {fmt_seconds(detail.get('deep_sleep_duration'))}"
+                if fmt_seconds(detail.get("deep_sleep_duration"))
+                else None,
+                f"REM {fmt_seconds(detail.get('rem_sleep_duration'))}"
+                if fmt_seconds(detail.get("rem_sleep_duration"))
+                else None,
+            ]
+        )
         if stages:
             sleep_bits.append(stages)
         watch = contributor_watch(ds.get("contributors") if ds else None)
@@ -454,7 +572,9 @@ def build_digest(bundle: dict[str, Any], *, days: int) -> str:
         lines.append("- " + compact_join(sleep_bits, " — "))
 
     if da:
-        bits = [f"activity {fmt_score(da.get('score'), prev_da.get('score') if prev_da else None)}"]
+        bits = [
+            f"activity {fmt_score(da.get('score'), prev_da.get('score') if prev_da else None)}"
+        ]
         steps = fmt_int(da.get("steps"))
         active_cal = fmt_int(da.get("active_calories"))
         alerts = da.get("inactivity_alerts")
@@ -503,18 +623,28 @@ def build_digest(bundle: dict[str, Any], *, days: int) -> str:
         if today_workouts:
             labels = []
             for w in today_workouts[:3]:
-                label = str(w.get("activity") or w.get("type") or "workout").replace("_", " ")
+                label = str(w.get("activity") or w.get("type") or "workout").replace(
+                    "_", " "
+                )
                 dur = fmt_seconds(w.get("duration"))
                 labels.append(f"{label}" + (f" {dur}" if dur else ""))
             if len(today_workouts) > 3:
-                labels.append(f"+{len(today_workouts)-3} more")
+                labels.append(f"+{len(today_workouts) - 3} more")
             bits.append("workouts: " + "; ".join(labels))
         if today_sessions:
             bits.append(f"sessions: {len(today_sessions)}")
         lines.append("- " + compact_join(bits, " — "))
 
-    if battery:
-        latest = sorted(battery, key=lambda x: x.get("timestamp_unix") or 0)[-1]
+    battery_rows = [x for x in battery if isinstance(x, dict)]
+    if battery_rows:
+
+        def battery_sort_key(row: dict[str, Any]) -> float:
+            try:
+                return float(row.get("timestamp_unix") or 0)
+            except Exception:
+                return 0.0
+
+        latest = sorted(battery_rows, key=battery_sort_key)[-1]
         level = latest.get("level")
         if level is not None:
             charging = " charging" if latest.get("charging") else ""
@@ -532,7 +662,30 @@ def build_digest(bundle: dict[str, Any], *, days: int) -> str:
 def ensure_parent_dir(path: str) -> None:
     parent = os.path.dirname(os.path.abspath(path))
     if parent:
-        os.makedirs(parent, exist_ok=True)
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+
+
+def ensure_private_file(path: str) -> None:
+    if os.name != "posix" or path == ":memory:":
+        return
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    except FileExistsError:
+        os.chmod(path, 0o600)
+    else:
+        os.close(fd)
+
+
+def ensure_private_existing_file(path: str) -> None:
+    if os.name != "posix" or path == ":memory:" or not os.path.exists(path):
+        return
+    os.chmod(path, 0o600)
+
+
+def ensure_private_sqlite_files(path: str) -> None:
+    ensure_private_file(path)
+    for suffix in ("-journal", "-wal", "-shm"):
+        ensure_private_existing_file(path + suffix)
 
 
 def stable_json(obj: Any) -> str:
@@ -547,7 +700,11 @@ def document_key(endpoint: str, doc: dict[str, Any]) -> str:
     explicit = doc.get("id") or doc.get("document_id")
     if explicit:
         return str(explicit)
-    bits = [endpoint, str(doc.get("day") or ""), str(doc.get("timestamp") or doc.get("bedtime_start") or "")]
+    bits = [
+        endpoint,
+        str(doc.get("day") or ""),
+        str(doc.get("timestamp") or doc.get("bedtime_start") or ""),
+    ]
     return ":".join(bits + [content_hash(doc)[:16]])
 
 
@@ -566,9 +723,11 @@ class OuraStore:
     def __init__(self, path: str = DEFAULT_DB_PATH):
         self.path = path
         ensure_parent_dir(path)
+        ensure_private_sqlite_files(path)
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.migrate()
+        ensure_private_sqlite_files(path)
 
     def close(self) -> None:
         self.conn.close()
@@ -611,12 +770,18 @@ class OuraStore:
         )
         self.conn.commit()
 
-    def upsert_documents(self, endpoint: str, docs: list[dict[str, Any]], fetched_at: str) -> tuple[int, int]:
+    def upsert_documents(
+        self, endpoint: str, docs: list[dict[str, Any]], fetched_at: str
+    ) -> tuple[int, int]:
         inserted = updated = 0
         for doc in docs:
             doc_id = document_key(endpoint, doc)
             day = document_day(doc)
-            timestamp = doc.get("timestamp") or doc.get("bedtime_start") or doc.get("bedtime_end")
+            timestamp = (
+                doc.get("timestamp")
+                or doc.get("bedtime_start")
+                or doc.get("bedtime_end")
+            )
             if timestamp is not None:
                 timestamp = str(timestamp)
             h = content_hash(doc)
@@ -644,9 +809,13 @@ class OuraStore:
             )
         return inserted, updated
 
-    def sync(self, client: OuraClient, days: int, *, include_timeseries: bool = True) -> dict[str, Any]:
+    def sync(
+        self, client: OuraClient, days: int, *, include_timeseries: bool = True
+    ) -> dict[str, Any]:
         started = dt.datetime.now(dt.timezone.utc).isoformat()
-        endpoints = list(DATE_ENDPOINTS.keys()) + (["ring_battery_level"] if include_timeseries else [])
+        endpoints = list(DATE_ENDPOINTS.keys()) + (
+            ["ring_battery_level"] if include_timeseries else []
+        )
         cur = self.conn.cursor()
         cur.execute(
             "insert into sync_runs(started_at, days, endpoints) values(?, ?, ?)",
@@ -658,12 +827,16 @@ class OuraStore:
         start_date, end_date = date_range(days)
         try:
             for endpoint, path in DATE_ENDPOINTS.items():
-                docs = client.list_documents(path, {"start_date": start_date, "end_date": end_date})
+                docs = client.list_documents(
+                    path, {"start_date": start_date, "end_date": end_date}
+                )
                 i, u = self.upsert_documents(endpoint, docs, started)
                 inserted += i
                 updated += u
             if include_timeseries:
-                docs = client.list_documents(TIMESERIES_ENDPOINTS["ring_battery_level"], {"latest": "true"})
+                docs = client.list_documents(
+                    TIMESERIES_ENDPOINTS["ring_battery_level"], {"latest": "true"}
+                )
                 i, u = self.upsert_documents("ring_battery_level", docs, started)
                 inserted += i
                 updated += u
@@ -674,14 +847,30 @@ class OuraStore:
             finished = dt.datetime.now(dt.timezone.utc).isoformat()
             cur.execute(
                 "update sync_runs set finished_at=?, inserted=?, updated=?, errors=? where id=?",
-                (finished, inserted, updated, json.dumps(errors) if errors else None, run_id),
+                (
+                    finished,
+                    inserted,
+                    updated,
+                    json.dumps(errors) if errors else None,
+                    run_id,
+                ),
             )
             self.conn.commit()
-        return {"run_id": run_id, "inserted": inserted, "updated": updated, "errors": errors, "db": self.path}
+        return {
+            "run_id": run_id,
+            "inserted": inserted,
+            "updated": updated,
+            "errors": errors,
+            "db": self.path,
+        }
 
     def load_bundle(self, days: int) -> dict[str, Any]:
         start_date, end_date = date_range(days)
-        bundle: dict[str, Any] = {"range": {"start_date": start_date, "end_date": end_date}, "source": "sqlite", "db": self.path}
+        bundle: dict[str, Any] = {
+            "range": {"start_date": start_date, "end_date": end_date},
+            "source": "sqlite",
+            "db": self.path,
+        }
         endpoints = sorted(set([*DATE_ENDPOINTS.keys(), *TIMESERIES_ENDPOINTS.keys()]))
         for endpoint in endpoints:
             if endpoint == "heartrate":
@@ -701,7 +890,9 @@ class OuraStore:
         return bundle
 
     def counts(self) -> dict[str, int]:
-        rows = self.conn.execute("select endpoint, count(*) c from documents group by endpoint order by endpoint").fetchall()
+        rows = self.conn.execute(
+            "select endpoint, count(*) c from documents group by endpoint order by endpoint"
+        ).fetchall()
         return {row["endpoint"]: int(row["c"]) for row in rows}
 
 
@@ -805,8 +996,16 @@ def is_main_sleep(row: dict[str, Any]) -> bool:
 
 
 def main_sleep_rows(bundle: dict[str, Any]) -> list[dict[str, Any]]:
-    rows = [r for r in bundle.get("sleep", []) if isinstance(r, dict) and is_main_sleep(r)]
-    return sorted(rows, key=lambda r: (str(r.get("day") or ""), numeric(r.get("total_sleep_duration")) or 0))
+    rows = [
+        r for r in bundle.get("sleep", []) if isinstance(r, dict) and is_main_sleep(r)
+    ]
+    return sorted(
+        rows,
+        key=lambda r: (
+            str(r.get("day") or ""),
+            numeric(r.get("total_sleep_duration")) or 0,
+        ),
+    )
 
 
 def latest_battery(bundle: dict[str, Any]) -> dict[str, Any] | None:
@@ -850,7 +1049,9 @@ def build_adaptive_analysis(bundle: dict[str, Any], *, days: int) -> str:
     if battery and battery.get("level") is not None:
         charging = " charging" if battery.get("charging") else ""
         battery_text = f"battery {battery.get('level')}%{charging}"
-    lines.append(f"- confidence: {confidence} — {compact_join(reasons[:3], '; ')}; {battery_text}")
+    lines.append(
+        f"- confidence: {confidence} — {compact_join(reasons[:3], '; ')}; {battery_text}"
+    )
 
     daily_sleep = bundle.get("daily_sleep") or []
     daily_readiness = bundle.get("daily_readiness") or []
@@ -869,9 +1070,13 @@ def build_adaptive_analysis(bundle: dict[str, Any], *, days: int) -> str:
         pct = percentile_rank(vals, latest_ready.get("score"))
         age = days_old(latest_ready.get("day"))
         temp = fmt_temp(latest_ready.get("temperature_deviation"))
-        watch = contributor_watch(latest_ready.get("contributors"), threshold=70, limit=2)
+        watch = contributor_watch(
+            latest_ready.get("contributors"), threshold=70, limit=2
+        )
         stale = f"; {age}d stale" if age and age > 1 else ""
-        bits = [f"readiness latest {fmt_num(latest_ready.get('score'))} on {latest_ready.get('day')} vs 14d median {fmt_num(med)} ({fmt_percentile(pct)}){stale}"]
+        bits = [
+            f"readiness latest {fmt_num(latest_ready.get('score'))} on {latest_ready.get('day')} vs 14d median {fmt_num(med)} ({fmt_percentile(pct)}){stale}"
+        ]
         if temp:
             bits.append(f"temp {temp}")
         if watch:
@@ -887,7 +1092,6 @@ def build_adaptive_analysis(bundle: dict[str, Any], *, days: int) -> str:
         avg_eff = mean([r.get("efficiency") for r in recent_sleeps])
         avg_hrv = mean([r.get("average_hrv") for r in recent_sleeps])
         avg_rhr = mean([r.get("lowest_heart_rate") for r in recent_sleeps])
-        latest_sleep = recent_sleeps[-1]
         sleep_bits = [
             f"14-night avg {fmt_seconds(avg_sleep)} asleep / {fmt_seconds(avg_bed)} in bed",
             f"eff {fmt_num(avg_eff)}%",
@@ -898,7 +1102,11 @@ def build_adaptive_analysis(bundle: dict[str, Any], *, days: int) -> str:
             vals = [r.get("score") for r in rows_last_n(daily_sleep, 14)]
             pct = percentile_rank(vals, latest_sleep_score.get("score"))
             age = days_old(latest_sleep_score.get("day"))
-            sleep_bits.insert(0, f"score latest {fmt_num(latest_sleep_score.get('score'))} on {latest_sleep_score.get('day')} ({fmt_percentile(pct)})" + (f"; {age}d stale" if age and age > 1 else ""))
+            sleep_bits.insert(
+                0,
+                f"score latest {fmt_num(latest_sleep_score.get('score'))} on {latest_sleep_score.get('day')} ({fmt_percentile(pct)})"
+                + (f"; {age}d stale" if age and age > 1 else ""),
+            )
         if (numeric(avg_sleep) or 0) < 6 * 3600:
             sleep_bits.append("signal: chronic short sleep vs normal 7–9h target")
         lines.append("- sleep: " + " — ".join(sleep_bits))
@@ -910,7 +1118,9 @@ def build_adaptive_analysis(bundle: dict[str, Any], *, days: int) -> str:
         vals = [r.get("score") for r in recent_activity]
         steps = mean([r.get("steps") for r in recent_activity])
         active_cal = mean([r.get("active_calories") for r in recent_activity])
-        zero_step_days = sum(1 for r in recent_activity if (numeric(r.get("steps")) or 0) == 0)
+        zero_step_days = sum(
+            1 for r in recent_activity if (numeric(r.get("steps")) or 0) == 0
+        )
         pct = percentile_rank(vals, latest_activity.get("score"))
         lines.append(
             "- activity: "
@@ -932,8 +1142,12 @@ def build_adaptive_analysis(bundle: dict[str, Any], *, days: int) -> str:
         if stress_high is not None and recovery_high is not None and recovery_high > 0:
             ratio = stress_high / recovery_high
         summary_text = ", ".join(f"{k}:{v}" for k, v in sorted(summaries.items()))
-        ratio_text = f"; stress/recovery ratio {ratio:.1f}:1" if ratio is not None else ""
-        lines.append(f"- stress: {summary_text}; avg high stress {fmt_seconds(stress_high)} / high recovery {fmt_seconds(recovery_high)}{ratio_text}")
+        ratio_text = (
+            f"; stress/recovery ratio {ratio:.1f}:1" if ratio is not None else ""
+        )
+        lines.append(
+            f"- stress: {summary_text}; avg high stress {fmt_seconds(stress_high)} / high recovery {fmt_seconds(recovery_high)}{ratio_text}"
+        )
 
     recent_res = rows_last_n(daily_resilience, 14)
     if recent_res:
@@ -941,7 +1155,9 @@ def build_adaptive_analysis(bundle: dict[str, Any], *, days: int) -> str:
         for row in recent_res:
             key = str(row.get("level") or "unknown")
             levels[key] = levels.get(key, 0) + 1
-        lines.append("- resilience: " + ", ".join(f"{k}:{v}" for k, v in sorted(levels.items())))
+        lines.append(
+            "- resilience: " + ", ".join(f"{k}:{v}" for k, v in sorted(levels.items()))
+        )
 
     recent_spo2 = rows_last_n(daily_spo2, 14)
     if recent_spo2:
@@ -952,15 +1168,29 @@ def build_adaptive_analysis(bundle: dict[str, Any], *, days: int) -> str:
             if isinstance(sp, dict):
                 sp_vals.append(sp.get("average"))
             bdi_vals.append(row.get("breathing_disturbance_index"))
-        lines.append(f"- breathing: SpO₂ avg {fmt_num(mean(sp_vals), 1)}%; BDI avg {fmt_num(mean(bdi_vals), 1)}")
+        lines.append(
+            f"- breathing: SpO₂ avg {fmt_num(mean(sp_vals), 1)}%; BDI avg {fmt_num(mean(bdi_vals), 1)}"
+        )
 
     # Actionable next step based on current data quality.
     if confidence != "high":
-        lines.append("- next move: wear it tonight after the recharge; I’ll treat tomorrow’s sleep/readiness as the first clean post-charge checkpoint.")
-    elif recent_ready and latest_ready and numeric(latest_ready.get("score")) is not None and (numeric(latest_ready.get("score")) or 0) < (median([r.get("score") for r in recent_ready]) or 0) - 10:
-        lines.append("- next move: recovery-biased day; keep the report focused on sleep debt, stress load, and easy activity.")
+        lines.append(
+            "- next move: wear it tonight after the recharge; I’ll treat tomorrow’s sleep/readiness as the first clean post-charge checkpoint."
+        )
+    elif (
+        recent_ready
+        and latest_ready
+        and numeric(latest_ready.get("score")) is not None
+        and (numeric(latest_ready.get("score")) or 0)
+        < (median([r.get("score") for r in recent_ready]) or 0) - 10
+    ):
+        lines.append(
+            "- next move: recovery-biased day; keep the report focused on sleep debt, stress load, and easy activity."
+        )
     else:
-        lines.append("- next move: keep collecting; strongest current target is stress/recovery balance plus sleep duration consistency.")
+        lines.append(
+            "- next move: keep collecting; strongest current target is stress/recovery balance plus sleep duration consistency."
+        )
 
     lines.append("_local baseline analysis; not medical advice._")
     return "\n".join(lines)
@@ -978,36 +1208,61 @@ def cmd_sync(args: argparse.Namespace) -> int:
         return 0
     store = OuraStore(args.db)
     try:
-        result = store.sync(OuraClient(token=token, timeout=args.timeout, max_pages=args.max_pages), args.days, include_timeseries=not args.no_timeseries)
+        result = store.sync(
+            OuraClient(token=token, timeout=args.timeout, max_pages=args.max_pages),
+            args.days,
+            include_timeseries=not args.no_timeseries,
+        )
         if not args.quiet:
             counts = store.counts()
-            print(json.dumps({"sync": result, "counts": counts}, indent=2, sort_keys=True))
+            print(
+                json.dumps({"sync": result, "counts": counts}, indent=2, sort_keys=True)
+            )
     finally:
         store.close()
     return 0
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
-    try:
-        token = get_token(required=not args.quiet_if_missing_token)
-    except MissingToken as exc:
-        if args.quiet_if_missing_token:
+    token = None
+    if args.sync:
+        try:
+            token = get_token(required=not args.quiet_if_missing_token)
+        except MissingToken as exc:
+            if args.quiet_if_missing_token:
+                return 0
+            eprint(str(exc))
+            return 2
+        if not token:
             return 0
-        eprint(str(exc))
-        return 2
     store = OuraStore(args.db)
     try:
         sync_result = None
-        if args.sync and token:
-            sync_result = store.sync(OuraClient(token=token, timeout=args.timeout, max_pages=args.max_pages), args.days, include_timeseries=not args.no_timeseries)
+        if args.sync:
+            sync_result = store.sync(
+                OuraClient(token=token, timeout=args.timeout, max_pages=args.max_pages),
+                args.days,
+                include_timeseries=not args.no_timeseries,
+            )
         bundle = store.load_bundle(args.days)
         if args.json:
-            print(json.dumps({"sync": sync_result, "analysis": build_adaptive_analysis(bundle, days=args.days), "counts": store.counts()}, indent=2, sort_keys=True))
+            print(
+                json.dumps(
+                    {
+                        "sync": sync_result,
+                        "analysis": build_adaptive_analysis(bundle, days=args.days),
+                        "counts": store.counts(),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
         else:
             print(build_adaptive_analysis(bundle, days=args.days))
     finally:
         store.close()
     return 0
+
 
 def cmd_digest(args: argparse.Namespace) -> int:
     try:
@@ -1030,7 +1285,9 @@ def cmd_digest(args: argparse.Namespace) -> int:
 
 def cmd_raw(args: argparse.Namespace) -> int:
     token = get_token(required=True)
-    assert token
+    if not token:
+        eprint("missing Oura API token")
+        return 2
     client = OuraClient(token=token, timeout=args.timeout, max_pages=args.max_pages)
     start, end = args.start_date, args.end_date
     if not start or not end:
@@ -1041,11 +1298,17 @@ def cmd_raw(args: argparse.Namespace) -> int:
         eprint("unknown endpoint. valid:", ", ".join(valid))
         return 2
     if args.endpoint in TIMESERIES_ENDPOINTS:
-        params = {"start_datetime": args.start_datetime, "end_datetime": args.end_datetime, "latest": "true" if args.latest else None}
+        params = {
+            "start_datetime": args.start_datetime,
+            "end_datetime": args.end_datetime,
+            "latest": "true" if args.latest else None,
+        }
     else:
         params = {"start_date": start, "end_date": end}
     data = client.list_documents(path, params)
-    print(json.dumps({"endpoint": args.endpoint, "data": data}, indent=2, sort_keys=True))
+    print(
+        json.dumps({"endpoint": args.endpoint, "data": data}, indent=2, sort_keys=True)
+    )
     return 0
 
 
@@ -1053,57 +1316,115 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="OpenClaw helper for Oura API v2")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    setup = sub.add_parser("setup-token", help="prompt for an Oura token and store it in macOS Keychain")
+    setup = sub.add_parser(
+        "setup-token", help="prompt for an Oura token and store it in macOS Keychain"
+    )
     setup.add_argument("--service", default=KEYCHAIN_SERVICE)
     setup.add_argument("--account", default=KEYCHAIN_ACCOUNT)
     setup.set_defaults(func=setup_token)
 
-    status = sub.add_parser("token-status", help="check whether a token source is configured")
+    status = sub.add_parser(
+        "token-status", help="check whether a token source is configured"
+    )
     status.add_argument("--service", default=KEYCHAIN_SERVICE)
     status.add_argument("--account", default=KEYCHAIN_ACCOUNT)
     status.set_defaults(func=token_status)
 
     digest = sub.add_parser("digest", help="print a concise daily health digest")
-    digest.add_argument("--days", type=int, default=7, help="lookback window for daily docs")
-    digest.add_argument("--timeout", type=int, default=30)
-    digest.add_argument("--max-pages", type=int, default=20)
-    digest.add_argument("--json", action="store_true", help="print raw fetched bundle JSON instead of digest text")
-    digest.add_argument("--no-timeseries", action="store_true", help="skip latest battery/time-series calls")
-    digest.add_argument("--quiet-if-missing-token", action="store_true", help="exit 0 with no output if no token is configured")
+    digest.add_argument(
+        "--days", type=positive_int, default=7, help="lookback window for daily docs"
+    )
+    digest.add_argument("--timeout", type=positive_int, default=30)
+    digest.add_argument("--max-pages", type=positive_int, default=20)
+    digest.add_argument(
+        "--json",
+        action="store_true",
+        help="print raw fetched bundle JSON instead of digest text",
+    )
+    digest.add_argument(
+        "--no-timeseries",
+        action="store_true",
+        help="skip latest battery/time-series calls",
+    )
+    digest.add_argument(
+        "--quiet-if-missing-token",
+        action="store_true",
+        help="exit 0 with no output if no token is configured",
+    )
     digest.set_defaults(func=cmd_digest)
 
-    sync = sub.add_parser("sync", help="sync Oura API data into the local gitignored SQLite database")
-    sync.add_argument("--days", type=int, default=90, help="lookback window to sync")
+    sync = sub.add_parser(
+        "sync", help="sync Oura API data into the local gitignored SQLite database"
+    )
+    sync.add_argument(
+        "--days", type=positive_int, default=90, help="lookback window to sync"
+    )
     sync.add_argument("--db", default=DEFAULT_DB_PATH)
-    sync.add_argument("--timeout", type=int, default=45)
-    sync.add_argument("--max-pages", type=int, default=50)
-    sync.add_argument("--no-timeseries", action="store_true", help="skip latest battery/time-series calls")
+    sync.add_argument("--timeout", type=positive_int, default=45)
+    sync.add_argument("--max-pages", type=positive_int, default=50)
+    sync.add_argument(
+        "--no-timeseries",
+        action="store_true",
+        help="skip latest battery/time-series calls",
+    )
     sync.add_argument("--quiet", action="store_true", help="do not print sync summary")
-    sync.add_argument("--quiet-if-missing-token", action="store_true", help="exit 0 with no output if no token is configured")
+    sync.add_argument(
+        "--quiet-if-missing-token",
+        action="store_true",
+        help="exit 0 with no output if no token is configured",
+    )
     sync.set_defaults(func=cmd_sync)
 
-    analyze = sub.add_parser("analyze", help="sync and print adaptive local-baseline analysis")
-    analyze.add_argument("--days", type=int, default=45, help="lookback window for analysis")
+    analyze = sub.add_parser(
+        "analyze", help="sync and print adaptive local-baseline analysis"
+    )
+    analyze.add_argument(
+        "--days", type=positive_int, default=45, help="lookback window for analysis"
+    )
     analyze.add_argument("--db", default=DEFAULT_DB_PATH)
-    analyze.add_argument("--timeout", type=int, default=45)
-    analyze.add_argument("--max-pages", type=int, default=50)
-    analyze.add_argument("--no-timeseries", action="store_true", help="skip latest battery/time-series calls during sync")
-    analyze.add_argument("--no-sync", dest="sync", action="store_false", help="analyze existing local database without fetching")
-    analyze.add_argument("--sync", dest="sync", action="store_true", default=True, help="fetch before analyzing (default)")
-    analyze.add_argument("--json", action="store_true", help="print JSON wrapper with report/counts")
-    analyze.add_argument("--quiet-if-missing-token", action="store_true", help="exit 0 with no output if no token is configured")
+    analyze.add_argument("--timeout", type=positive_int, default=45)
+    analyze.add_argument("--max-pages", type=positive_int, default=50)
+    analyze.add_argument(
+        "--no-timeseries",
+        action="store_true",
+        help="skip latest battery/time-series calls during sync",
+    )
+    analyze.add_argument(
+        "--no-sync",
+        dest="sync",
+        action="store_false",
+        help="analyze existing local database without fetching",
+    )
+    analyze.add_argument(
+        "--sync",
+        dest="sync",
+        action="store_true",
+        default=True,
+        help="fetch before analyzing (default)",
+    )
+    analyze.add_argument(
+        "--json", action="store_true", help="print JSON wrapper with report/counts"
+    )
+    analyze.add_argument(
+        "--quiet-if-missing-token",
+        action="store_true",
+        help="exit 0 with no output if no token is configured",
+    )
     analyze.set_defaults(func=cmd_analyze)
 
     raw = sub.add_parser("raw", help="fetch one endpoint as JSON")
-    raw.add_argument("endpoint", help="endpoint nickname, e.g. daily_sleep, sleep, ring_battery_level")
-    raw.add_argument("--days", type=int, default=7)
+    raw.add_argument(
+        "endpoint",
+        help="endpoint nickname, e.g. daily_sleep, sleep, ring_battery_level",
+    )
+    raw.add_argument("--days", type=positive_int, default=7)
     raw.add_argument("--start-date")
     raw.add_argument("--end-date")
     raw.add_argument("--start-datetime")
     raw.add_argument("--end-datetime")
     raw.add_argument("--latest", action="store_true")
-    raw.add_argument("--timeout", type=int, default=30)
-    raw.add_argument("--max-pages", type=int, default=20)
+    raw.add_argument("--timeout", type=positive_int, default=30)
+    raw.add_argument("--max-pages", type=positive_int, default=20)
     raw.set_defaults(func=cmd_raw)
 
     return parser
