@@ -171,6 +171,34 @@ class AnalysisTests(unittest.TestCase):
             run_security.call_args.kwargs["input_text"], sample_value + "\n"
         )
 
+    def test_token_status_reports_unreadable_keychain_item(self):
+        denied = oh.subprocess.CompletedProcess(
+            args=["security"], returncode=36, stdout="", stderr=""
+        )
+        metadata = oh.subprocess.CompletedProcess(
+            args=["security"], returncode=0, stdout="metadata", stderr=""
+        )
+        with patch.object(oh, "run_security", side_effect=[denied, metadata]):
+            args = argparse.Namespace(service="svc", account="acct")
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(oh.token_status(args), 1)
+        self.assertIn("item exists but password is not readable", stdout.getvalue())
+
+    def test_required_token_reports_unreadable_keychain_item(self):
+        denied = oh.subprocess.CompletedProcess(
+            args=["security"], returncode=36, stdout="", stderr=""
+        )
+        metadata = oh.subprocess.CompletedProcess(
+            args=["security"], returncode=0, stdout="metadata", stderr=""
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(oh, "run_security", side_effect=[denied, metadata]),
+            self.assertRaisesRegex(oh.MissingToken, "exists in macOS Keychain"),
+        ):
+            oh.get_token(required=True)
+
     def test_sqlite_file_is_private_on_posix(self):
         if os.name != "posix":
             self.skipTest("POSIX file modes only")

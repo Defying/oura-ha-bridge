@@ -73,6 +73,13 @@ class MissingToken(OuraError):
     pass
 
 
+@dataclass(frozen=True)
+class KeychainLookup:
+    token: str | None
+    item_exists: bool
+    read_error: str | None = None
+
+
 def eprint(*args: Any) -> None:
     print(*args, file=sys.stderr)
 
@@ -111,14 +118,33 @@ def run_security(
         )
 
 
+def keychain_read_error(proc: subprocess.CompletedProcess[str]) -> str:
+    detail = proc.stderr.strip()
+    if detail:
+        return detail
+    return f"security exited {proc.returncode}; Keychain may be locked or requiring user interaction"
+
+
+def lookup_keychain_token(
+    service: str = KEYCHAIN_SERVICE, account: str = KEYCHAIN_ACCOUNT
+) -> KeychainLookup:
+    proc = run_security(["find-generic-password", "-s", service, "-a", account, "-w"])
+    if proc.returncode == 0:
+        token = proc.stdout.strip()
+        return KeychainLookup(token or None, item_exists=bool(token))
+
+    metadata = run_security(["find-generic-password", "-s", service, "-a", account])
+    if metadata.returncode == 0:
+        return KeychainLookup(
+            None, item_exists=True, read_error=keychain_read_error(proc)
+        )
+    return KeychainLookup(None, item_exists=False, read_error=metadata.stderr.strip())
+
+
 def get_keychain_token(
     service: str = KEYCHAIN_SERVICE, account: str = KEYCHAIN_ACCOUNT
 ) -> str | None:
-    proc = run_security(["find-generic-password", "-s", service, "-a", account, "-w"])
-    if proc.returncode != 0:
-        return None
-    token = proc.stdout.strip()
-    return token or None
+    return lookup_keychain_token(service, account).token
 
 
 def store_keychain_token(
@@ -145,10 +171,16 @@ def get_token(required: bool = True) -> str | None:
     token = os.environ.get("OURA_TOKEN", "").strip()
     if token:
         return token
-    token = get_keychain_token()
-    if token:
-        return token
+    keychain = lookup_keychain_token()
+    if keychain.token:
+        return keychain.token
     if required:
+        if keychain.item_exists:
+            raise MissingToken(
+                "Oura token exists in macOS Keychain but cannot be read from this session: "
+                f"{keychain.read_error or 'unknown Keychain error'}. "
+                "Unlock the login keychain or run `oura-health setup-token` from an interactive terminal."
+            )
         raise MissingToken(
             "missing Oura API token. Run `oura-health setup-token` privately on this Mac, "
             "or set OURA_TOKEN in the environment."
@@ -188,12 +220,19 @@ def token_status(args: argparse.Namespace) -> int:
     if os.environ.get("OURA_TOKEN", "").strip():
         print("token source: OURA_TOKEN environment variable")
         return 0
-    token = get_keychain_token(args.service, args.account)
-    if token:
+    keychain = lookup_keychain_token(args.service, args.account)
+    if keychain.token:
         print(
             f"token source: macOS Keychain service={args.service!r} account={args.account!r}"
         )
         return 0
+    if keychain.item_exists:
+        print(
+            "token source: macOS Keychain item exists but password is not readable "
+            f"service={args.service!r} account={args.account!r}: "
+            f"{keychain.read_error or 'unknown Keychain error'}"
+        )
+        return 1
     print(
         f"missing token: no OURA_TOKEN env var and no Keychain item service={args.service!r} account={args.account!r}"
     )
